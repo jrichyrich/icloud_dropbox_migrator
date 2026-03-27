@@ -23,14 +23,16 @@ class FileState:
 
 
 class ICloudManager:
+    PACKAGE_EXTENSIONS = {".key", ".pages", ".numbers"}
+
     def __init__(self, helper_path: Path | None = None) -> None:
         self.helper_path = helper_path or Path(__file__).with_name("native_icloud.jxa")
 
     def start_download(self, path: Path) -> None:
-        self._native_action("download", path)
+        self._native_action("download", self._icloud_action_path(path))
 
     def evict_local_copy(self, path: Path) -> None:
-        self._native_action("evict", path)
+        self._native_action("evict", self._icloud_action_path(path))
 
     def ensure_local_file(
         self,
@@ -39,10 +41,11 @@ class ICloudManager:
         timeout_seconds: int = 3600,
         poll_seconds: float = 2.0,
     ) -> FileState:
-        initial_state = self.inspect(path)
+        action_path = self._icloud_action_path(path)
+        initial_state = self.inspect(action_path)
         if not initial_state.is_dataless:
             self._verify_readable(path)
-            return initial_state
+            return self.inspect(path)
 
         self.start_download(path)
         deadline = time.monotonic() + timeout_seconds
@@ -50,7 +53,7 @@ class ICloudManager:
         previous_state: FileState | None = None
 
         while time.monotonic() < deadline:
-            state = self.inspect(path)
+            state = self.inspect(action_path)
             if not state.is_dataless:
                 if previous_state and previous_state.size == state.size:
                     stable_polls += 1
@@ -58,7 +61,7 @@ class ICloudManager:
                     stable_polls = 0
                 if stable_polls >= 1:
                     self._verify_readable(path)
-                    return state
+                    return self.inspect(path)
             previous_state = state
             time.sleep(poll_seconds)
 
@@ -83,6 +86,13 @@ class ICloudManager:
     def _verify_readable(self, path: Path) -> None:
         with path.open("rb") as handle:
             handle.read(64 * 1024)
+
+    def _icloud_action_path(self, path: Path) -> Path:
+        resolved = path.expanduser().resolve()
+        for candidate in (resolved, *resolved.parents):
+            if candidate.suffix.lower() in self.PACKAGE_EXTENSIONS:
+                return candidate
+        return resolved
 
     def _native_action(self, action: str, path: Path) -> None:
         try:
