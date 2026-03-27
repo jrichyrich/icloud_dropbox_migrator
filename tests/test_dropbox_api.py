@@ -43,6 +43,19 @@ class DropboxClientTests(unittest.TestCase):
         self.assertEqual(client._app_key, "app-key")
         self.assertEqual(client._app_secret, "app-secret")
 
+    @mock.patch("icloud_dropbox_migrator.dropbox_api.load_dropbox_credentials")
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_from_env_reads_refresh_token_auth_from_keychain(self, load_dropbox_credentials: mock.Mock) -> None:
+        load_dropbox_credentials.return_value.app_key = "app-key"
+        load_dropbox_credentials.return_value.app_secret = "app-secret"
+        load_dropbox_credentials.return_value.refresh_token = "refresh-token"
+
+        client = DropboxClient.from_env()
+
+        self.assertEqual(client._refresh_token, "refresh-token")
+        self.assertEqual(client._app_key, "app-key")
+        self.assertEqual(client._app_secret, "app-secret")
+
     @mock.patch("icloud_dropbox_migrator.dropbox_api.DropboxClient._content_request")
     def test_simple_upload_returns_structured_result(self, content_request: mock.Mock) -> None:
         content_request.return_value = {

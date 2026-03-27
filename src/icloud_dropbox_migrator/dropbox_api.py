@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib import error, parse, request
 
+from .keychain import KeychainError, load_dropbox_credentials
+
 
 API_URL = "https://api.dropboxapi.com"
 CONTENT_URL = "https://content.dropboxapi.com"
@@ -73,6 +75,14 @@ class DropboxClient:
         refresh_token = os.environ.get("DROPBOX_REFRESH_TOKEN")
         app_key = os.environ.get("DROPBOX_APP_KEY")
         app_secret = os.environ.get("DROPBOX_APP_SECRET")
+        if not refresh_token or not app_key or not app_secret:
+            try:
+                keychain_credentials = load_dropbox_credentials()
+            except KeychainError as exc:
+                raise DropboxError(str(exc)) from exc
+            refresh_token = refresh_token or keychain_credentials.refresh_token
+            app_key = app_key or keychain_credentials.app_key
+            app_secret = app_secret or keychain_credentials.app_secret
 
         if refresh_token:
             if not app_key or not app_secret:
@@ -89,7 +99,7 @@ class DropboxClient:
         if not access_token:
             raise DropboxError(
                 "set DROPBOX_ACCESS_TOKEN, or set DROPBOX_REFRESH_TOKEN with "
-                "DROPBOX_APP_KEY and DROPBOX_APP_SECRET"
+                "DROPBOX_APP_KEY and DROPBOX_APP_SECRET in the environment or macOS Keychain"
             )
         return cls(access_token=access_token)
 

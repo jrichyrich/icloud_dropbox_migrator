@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .db import StateStore
 from .dropbox_api import DropboxClient, DropboxError, DropboxTokenSet
+from .keychain import KeychainError, load_dropbox_credentials, store_dropbox_credentials
 from .worker import MigrationWorker, default_db_path, scan_source_tree
 
 
@@ -61,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_parser.add_argument("--redirect-uri", default=os.environ.get("DROPBOX_REDIRECT_URI"))
     exchange_parser.add_argument("--code", required=True)
 
+    keychain_store_parser = subparsers.add_parser(
+        "dropbox-keychain-store",
+        help="Store Dropbox app credentials in the macOS Keychain",
+    )
+    keychain_store_parser.add_argument("--app-key", default=os.environ.get("DROPBOX_APP_KEY"))
+    keychain_store_parser.add_argument("--app-secret", default=os.environ.get("DROPBOX_APP_SECRET"))
+    keychain_store_parser.add_argument("--refresh-token", default=os.environ.get("DROPBOX_REFRESH_TOKEN"))
+
     subparsers.add_parser(
         "dropbox-whoami",
         help="Validate the configured Dropbox credentials and print the current account",
@@ -74,6 +83,15 @@ def require_value(parser: argparse.ArgumentParser, value: str | None, message: s
         return value
     parser.error(message)
     raise AssertionError("unreachable")
+
+
+def resolve_dropbox_credential(
+    parser: argparse.ArgumentParser,
+    explicit_value: str | None,
+    keychain_value: str | None,
+    error_message: str,
+) -> str:
+    return require_value(parser, explicit_value or keychain_value, error_message)
 
 
 def print_token_exports(token_set: DropboxTokenSet) -> None:
@@ -94,6 +112,10 @@ def print_token_exports(token_set: DropboxTokenSet) -> None:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    try:
+        keychain_credentials = load_dropbox_credentials()
+    except KeychainError as exc:
+        parser.error(str(exc))
 
     logging.basicConfig(
         level=getattr(logging, getattr(args, "log_level", "INFO").upper(), logging.INFO),
@@ -159,7 +181,12 @@ def main() -> int:
         return 0
 
     if args.command == "dropbox-auth-url":
-        app_key = require_value(parser, args.app_key, "--app-key or DROPBOX_APP_KEY is required")
+        app_key = resolve_dropbox_credential(
+            parser,
+            args.app_key,
+            keychain_credentials.app_key,
+            "--app-key, DROPBOX_APP_KEY, or a stored macOS Keychain app key is required",
+        )
         url = DropboxClient.build_authorize_url(
             app_key=app_key,
             redirect_uri=args.redirect_uri,
@@ -170,11 +197,17 @@ def main() -> int:
         return 0
 
     if args.command == "dropbox-exchange-code":
-        app_key = require_value(parser, args.app_key, "--app-key or DROPBOX_APP_KEY is required")
-        app_secret = require_value(
+        app_key = resolve_dropbox_credential(
+            parser,
+            args.app_key,
+            keychain_credentials.app_key,
+            "--app-key, DROPBOX_APP_KEY, or a stored macOS Keychain app key is required",
+        )
+        app_secret = resolve_dropbox_credential(
             parser,
             args.app_secret,
-            "--app-secret or DROPBOX_APP_SECRET is required",
+            keychain_credentials.app_secret,
+            "--app-secret, DROPBOX_APP_SECRET, or a stored macOS Keychain app secret is required",
         )
         token_set = DropboxClient.exchange_code_for_tokens(
             app_key=app_key,
@@ -183,6 +216,20 @@ def main() -> int:
             redirect_uri=args.redirect_uri,
         )
         print_token_exports(token_set)
+        return 0
+
+    if args.command == "dropbox-keychain-store":
+        stored = store_dropbox_credentials(
+            app_key=args.app_key,
+            app_secret=args.app_secret,
+            refresh_token=args.refresh_token,
+        )
+        if not stored:
+            parser.error(
+                "provide at least one of --app-key, --app-secret, or --refresh-token "
+                "(or set the matching environment variables)"
+            )
+        print("stored Dropbox credentials in macOS Keychain: " + ", ".join(stored))
         return 0
 
     if args.command == "dropbox-whoami":

@@ -209,6 +209,31 @@ class StateStore:
             )
             return cursor.rowcount
 
+    def skip_paths_by_name(self, file_names: set[str]) -> int:
+        if not file_names:
+            return 0
+        exact_match_sql = " OR ".join("relative_path = ?" for _ in file_names)
+        suffix_match_sql = " OR ".join("relative_path LIKE ?" for _ in file_names)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE items
+                SET status = 'skipped', updated_at = ?
+                WHERE item_type = 'file'
+                  AND status IN ('pending', 'failed')
+                  AND (
+                    {exact_match_sql}
+                    OR {suffix_match_sql}
+                  )
+                """,
+                (
+                    utc_now(),
+                    *file_names,
+                    *(f"%/{file_name}" for file_name in file_names),
+                ),
+            )
+            return cursor.rowcount
+
     def next_work_item(self) -> sqlite3.Row | None:
         with self.connection() as conn:
             uploaded_row = conn.execute(
@@ -312,4 +337,3 @@ class StateStore:
                 """,
                 (limit,),
             ).fetchall()
-

@@ -39,6 +39,11 @@ class ICloudManager:
         timeout_seconds: int = 3600,
         poll_seconds: float = 2.0,
     ) -> FileState:
+        initial_state = self.inspect(path)
+        if not initial_state.is_dataless:
+            self._verify_readable(path)
+            return initial_state
+
         self.start_download(path)
         deadline = time.monotonic() + timeout_seconds
         stable_polls = 0

@@ -15,6 +15,7 @@ This project migrates an iCloud folder tree into Dropbox without requiring the e
 - A Dropbox app with `files.content.write`
 - Dropbox credentials via either:
   - `DROPBOX_REFRESH_TOKEN`, `DROPBOX_APP_KEY`, and `DROPBOX_APP_SECRET`
+  - or the same three values stored in the macOS Keychain
   - or a fallback `DROPBOX_ACCESS_TOKEN`
 
 ## Dropbox Setup
@@ -45,6 +46,21 @@ export DROPBOX_APP_KEY="..."
 export DROPBOX_APP_SECRET="..."
 export DROPBOX_REFRESH_TOKEN="..."
 ```
+
+To stop depending on `op run` for every invocation, you can store the app key,
+app secret, and refresh token in the macOS Keychain once:
+
+```bash
+export DROPBOX_APP_KEY="..."
+export DROPBOX_APP_SECRET="..."
+export DROPBOX_REFRESH_TOKEN="..."
+
+python -m icloud_dropbox_migrator.cli dropbox-keychain-store
+```
+
+After that, runtime commands like `run` and `dropbox-whoami` can use the
+stored Keychain values even when the corresponding environment variables are
+unset.
 
 You can verify the configured Dropbox account with:
 

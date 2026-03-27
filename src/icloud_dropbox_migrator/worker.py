@@ -12,6 +12,7 @@ from .icloud import ICloudError, ICloudManager
 
 
 LOGGER = logging.getLogger(__name__)
+IGNORED_FILE_NAMES = {".DS_Store"}
 
 
 @dataclass(slots=True)
@@ -37,9 +38,12 @@ def scan_source_tree(store: StateStore, source_root: Path) -> ScanResult:
     if not source_root.exists():
         raise FileNotFoundError(f"source root does not exist: {source_root}")
 
+    store.skip_paths_by_name(IGNORED_FILE_NAMES)
     result = ScanResult()
     for path in sorted(source_root.rglob("*")):
         if path.is_symlink():
+            continue
+        if path.is_file() and path.name in IGNORED_FILE_NAMES:
             continue
         relative_path = path.relative_to(source_root).as_posix()
         stat_info = path.stat()
@@ -107,34 +111,34 @@ class MigrationWorker:
         path = Path(item["source_path"])
         LOGGER.info("processing %s", item["relative_path"])
 
-        if item["status"] == "uploaded":
-            self._evict_only(item, path, run_id, summary)
-            return
+        uploaded = item["status"] == "uploaded"
 
         for attempt in range(1, self.retry_limit + 1):
             try:
-                self.store.update_item_status(item["id"], "hydrating", run_id=run_id, last_error="")
-                state = self.icloud.ensure_local_file(
-                    path,
-                    timeout_seconds=self.hydrate_timeout_seconds,
-                )
-                LOGGER.info("hydrated %s (%s bytes)", item["relative_path"], state.size)
-                self.store.update_item_status(item["id"], "ready_local", run_id=run_id)
+                if not uploaded:
+                    self.store.update_item_status(item["id"], "hydrating", run_id=run_id, last_error="")
+                    state = self.icloud.ensure_local_file(
+                        path,
+                        timeout_seconds=self.hydrate_timeout_seconds,
+                    )
+                    LOGGER.info("hydrated %s (%s bytes)", item["relative_path"], state.size)
+                    self.store.update_item_status(item["id"], "ready_local", run_id=run_id)
 
-                self.store.update_item_status(item["id"], "uploading", run_id=run_id)
-                upload_result = self.dropbox_client.upload_file(
-                    path,
-                    self.dropbox_root,
-                    item["relative_path"],
-                )
-                summary.uploaded += 1
-                self.store.update_item_status(
-                    item["id"],
-                    "uploaded",
-                    run_id=run_id,
-                    dropbox_path=upload_result.path_display,
-                    uploaded_at=utc_now(),
-                )
+                    self.store.update_item_status(item["id"], "uploading", run_id=run_id)
+                    upload_result = self.dropbox_client.upload_file(
+                        path,
+                        self.dropbox_root,
+                        item["relative_path"],
+                    )
+                    summary.uploaded += 1
+                    self.store.update_item_status(
+                        item["id"],
+                        "uploaded",
+                        run_id=run_id,
+                        dropbox_path=upload_result.path_display,
+                        uploaded_at=utc_now(),
+                    )
+                    uploaded = True
 
                 self.icloud.evict_local_copy(path)
                 summary.evicted += 1
