@@ -1,0 +1,34 @@
+ObjC.import("Foundation");
+
+function fail(message) {
+  console.log(JSON.stringify({ ok: false, error: String(message) }));
+  $.exit(1);
+}
+
+function run(argv) {
+  if (argv.length < 2) {
+    fail("usage: native_icloud.jxa <download|evict> <path>");
+  }
+
+  const action = argv[0];
+  const path = argv[1];
+  const url = $.NSURL.fileURLWithPath(path);
+  const fm = $.NSFileManager.defaultManager;
+  const err = Ref();
+  let ok = false;
+
+  if (action === "download") {
+    ok = fm.startDownloadingUbiquitousItemAtURLError(url, err);
+  } else if (action === "evict") {
+    ok = fm.evictUbiquitousItemAtURLError(url, err);
+  } else {
+    fail("unsupported action: " + action);
+  }
+
+  if (!ok) {
+    const description = err[0] ? ObjC.unwrap(err[0].localizedDescription) : "unknown error";
+    fail(description);
+  }
+
+  console.log(JSON.stringify({ ok: true, action: action, path: path }));
+}
