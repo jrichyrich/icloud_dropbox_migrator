@@ -13,6 +13,8 @@ from .icloud import ICloudError, ICloudManager
 
 LOGGER = logging.getLogger(__name__)
 IGNORED_FILE_NAMES = {".DS_Store"}
+UPLOAD_HEARTBEAT_BYTES = 64 * 1024 * 1024
+UPLOAD_HEARTBEAT_SECONDS = 15.0
 
 
 @dataclass(slots=True)
@@ -111,7 +113,7 @@ class MigrationWorker:
         path = Path(item["source_path"])
         LOGGER.info("processing %s", item["relative_path"])
 
-        uploaded = item["status"] == "uploaded"
+        uploaded = item["status"] == "uploaded" or bool(item["dropbox_path"] and item["uploaded_at"])
 
         for attempt in range(1, self.retry_limit + 1):
             try:
@@ -125,10 +127,36 @@ class MigrationWorker:
                     self.store.update_item_status(item["id"], "ready_local", run_id=run_id)
 
                     self.store.update_item_status(item["id"], "uploading", run_id=run_id)
+                    last_progress_bytes = 0
+                    last_progress_touch = time.monotonic()
+
+                    def report_upload_progress(uploaded_bytes: int, total_bytes: int) -> None:
+                        nonlocal last_progress_bytes, last_progress_touch
+                        now = time.monotonic()
+                        should_log = (
+                            uploaded_bytes >= total_bytes
+                            or uploaded_bytes - last_progress_bytes >= UPLOAD_HEARTBEAT_BYTES
+                        )
+                        should_touch = now - last_progress_touch >= UPLOAD_HEARTBEAT_SECONDS
+                        if should_log:
+                            percent = (uploaded_bytes / total_bytes) * 100 if total_bytes else 100.0
+                            LOGGER.info(
+                                "uploading %s: %.1f%% (%s/%s bytes)",
+                                item["relative_path"],
+                                percent,
+                                uploaded_bytes,
+                                total_bytes,
+                            )
+                            last_progress_bytes = uploaded_bytes
+                        if should_touch:
+                            self.store.update_item_status(item["id"], "uploading", run_id=run_id)
+                            last_progress_touch = now
+
                     upload_result = self.dropbox_client.upload_file(
                         path,
                         self.dropbox_root,
                         item["relative_path"],
+                        progress_callback=report_upload_progress,
                     )
                     summary.uploaded += 1
                     self.store.update_item_status(

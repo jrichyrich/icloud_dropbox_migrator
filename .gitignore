@@ -1,3 +1,5 @@
 __pycache__/
 *.py[cod]
 migration_state.sqlite3
+migration_state.sqlite3-shm
+migration_state.sqlite3-wal

@@ -54,3 +54,35 @@ class StateStoreTests(unittest.TestCase):
             row = conn.execute("SELECT status, last_error FROM items").fetchone()
         self.assertEqual(row["status"], "pending")
         self.assertIsNone(row["last_error"])
+
+    def test_active_item_and_recent_completed(self) -> None:
+        first = Path("/tmp/first.txt")
+        second = Path("/tmp/second.txt")
+        self.store.upsert_path(first, "first.txt", "file", 10, 1.0)
+        self.store.upsert_path(second, "second.txt", "file", 10, 1.0)
+
+        with self.store.connection() as conn:
+            conn.execute(
+                """
+                UPDATE items
+                SET status = 'evicted', uploaded_at = '2026-01-01T00:00:00+00:00',
+                    evicted_at = '2026-01-01T00:01:00+00:00'
+                WHERE relative_path = 'first.txt'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE items
+                SET status = 'uploading', updated_at = '2026-01-01T00:02:00+00:00', attempt_count = 2
+                WHERE relative_path = 'second.txt'
+                """
+            )
+
+        active = self.store.active_item()
+        recent = self.store.recent_completed(limit=5)
+
+        self.assertEqual(active["relative_path"], "second.txt")
+        self.assertEqual(active["status"], "uploading")
+        self.assertEqual(active["attempt_count"], 2)
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["relative_path"], "first.txt")

@@ -31,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--retry-delay-seconds", type=float, default=5.0)
 
     subparsers.add_parser("status", help="Show migration status", parents=[common])
+    progress_parser = subparsers.add_parser("progress", help="Show migration progress details", parents=[common])
+    progress_parser.add_argument("--recent", type=int, default=10, help="Number of recent completed files to show")
 
     retry_parser = subparsers.add_parser(
         "retry-failed",
@@ -172,6 +174,45 @@ def main() -> int:
                     f"- {failure['relative_path']} "
                     f"(attempts={failure['attempt_count']}): {failure['last_error']}"
                 )
+        return 0
+
+    if args.command == "progress":
+        store = StateStore(args.db)
+        counts = store.status_counts()
+        if not counts:
+            print("no items in manifest")
+            return 0
+
+        total = sum(counts.values())
+        evicted = counts.get("evicted", 0)
+        skipped = counts.get("skipped", 0)
+        print(f"total: {total}")
+        print(f"completed: {evicted}")
+        print(f"skipped: {skipped}")
+        print(f"remaining: {total - evicted - skipped}")
+
+        print("")
+        print("status counts:")
+        for status, count in sorted(counts.items()):
+            print(f"- {status}: {count}")
+
+        active = store.active_item()
+        if active:
+            print("")
+            print("active item:")
+            print(
+                f"- {active['relative_path']} "
+                f"[{active['status']}] attempts={active['attempt_count']} "
+                f"updated_at={active['updated_at']}"
+            )
+
+        recent = store.recent_completed(limit=args.recent)
+        if recent:
+            print("")
+            print("recent completed:")
+            for row in recent:
+                finished_at = row["evicted_at"] or row["uploaded_at"] or ""
+                print(f"- {row['relative_path']} [{row['status']}] at {finished_at}")
         return 0
 
     if args.command == "retry-failed":

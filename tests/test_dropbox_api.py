@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from icloud_dropbox_migrator import dropbox_api
 from icloud_dropbox_migrator.dropbox_api import DropboxClient, DropboxTokenSet, UploadResult
 
 
@@ -14,6 +15,13 @@ class DropboxClientTests(unittest.TestCase):
     def test_build_destination_preserves_tree(self) -> None:
         destination = DropboxClient._build_destination("/Root", "nested/file.txt")
         self.assertEqual(destination, "/Root/nested/file.txt")
+
+    def test_build_destination_sanitizes_trailing_spaces_and_periods(self) -> None:
+        destination = DropboxClient._build_destination(
+            "/Migrated/Gospel Doctrine",
+            "2025 - Doctrine and Covenants /March_16_2025.key. ",
+        )
+        self.assertEqual(destination, "/Migrated/Gospel Doctrine/2025 - Doctrine and Covenants/March_16_2025.key")
 
     def test_build_authorize_url_requests_offline_access(self) -> None:
         url = DropboxClient.build_authorize_url(
@@ -64,15 +72,22 @@ class DropboxClientTests(unittest.TestCase):
             "id": "id:abc",
         }
         client = DropboxClient(access_token="token")
+        progress_updates: list[tuple[int, int]] = []
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "file.txt"
             path.write_text("hello", encoding="utf-8")
-            result = client.upload_file(path, "/Root", "file.txt")
+            result = client.upload_file(
+                path,
+                "/Root",
+                "file.txt",
+                progress_callback=lambda uploaded, total: progress_updates.append((uploaded, total)),
+            )
         self.assertEqual(
             result,
             UploadResult(path_display="/Root/file.txt", path_lower="/root/file.txt", dropbox_id="id:abc"),
         )
         self.assertEqual(content_request.call_args.args[0], "/2/files/upload")
+        self.assertEqual(progress_updates, [(5, 5)])
 
     @mock.patch("icloud_dropbox_migrator.dropbox_api.DropboxClient._form_request")
     def test_exchange_code_for_tokens_returns_refresh_token(self, form_request: mock.Mock) -> None:
@@ -117,6 +132,38 @@ class DropboxClientTests(unittest.TestCase):
         self.assertEqual(second, "new-access-token")
         self.assertEqual(form_request.call_count, 1)
         self.assertIsNotNone(client._access_token_expires_at)
+
+    @mock.patch.object(dropbox_api, "CHUNK_SIZE", 4)
+    @mock.patch.object(dropbox_api, "SIMPLE_UPLOAD_LIMIT", 4)
+    @mock.patch("icloud_dropbox_migrator.dropbox_api.DropboxClient._content_request")
+    def test_session_upload_allows_null_append_response(self, content_request: mock.Mock) -> None:
+        content_request.side_effect = [
+            {"session_id": "sid-123"},
+            None,
+            {
+                "path_display": "/Root/file.bin",
+                "path_lower": "/root/file.bin",
+                "id": "id:abc",
+            },
+        ]
+        client = DropboxClient(access_token="token")
+        progress_updates: list[tuple[int, int]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "file.bin"
+            path.write_bytes(b"abcdefghij")
+            result = client.upload_file(
+                path,
+                "/Root",
+                "file.bin",
+                progress_callback=lambda uploaded, total: progress_updates.append((uploaded, total)),
+            )
+
+        self.assertEqual(result.path_display, "/Root/file.bin")
+        self.assertEqual(content_request.call_args_list[1].args[0], "/2/files/upload_session/append_v2")
+        self.assertTrue(content_request.call_args_list[1].kwargs["allow_null"])
+        self.assertEqual(content_request.call_args_list[2].args[0], "/2/files/upload_session/finish")
+        self.assertEqual(progress_updates, [(4, 10), (8, 10), (10, 10)])
 
     @mock.patch("icloud_dropbox_migrator.dropbox_api.DropboxClient._json_response")
     @mock.patch("icloud_dropbox_migrator.dropbox_api.request.Request")

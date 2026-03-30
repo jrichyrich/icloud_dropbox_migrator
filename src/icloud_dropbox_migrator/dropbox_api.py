@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 from .keychain import KeychainError, load_dropbox_credentials
@@ -15,9 +15,10 @@ API_URL = "https://api.dropboxapi.com"
 CONTENT_URL = "https://content.dropboxapi.com"
 AUTHORIZE_URL = "https://www.dropbox.com/oauth2/authorize"
 TOKEN_URL = "https://api.dropbox.com/oauth2/token"
-CHUNK_SIZE = 8 * 1024 * 1024
+CHUNK_SIZE = int(os.environ.get("DROPBOX_CHUNK_SIZE_BYTES", 1 * 1024 * 1024))
 SIMPLE_UPLOAD_LIMIT = 150 * 1024 * 1024
 TOKEN_REFRESH_SKEW_SECONDS = 60
+REQUEST_TIMEOUT_SECONDS = 120
 
 
 class DropboxError(RuntimeError):
@@ -144,17 +145,31 @@ class DropboxClient:
         payload = cls._form_request(TOKEN_URL, form)
         return DropboxTokenSet.from_dict(payload)
 
-    def upload_file(self, local_path: Path, dropbox_root: str, relative_path: str) -> UploadResult:
+    def upload_file(
+        self,
+        local_path: Path,
+        dropbox_root: str,
+        relative_path: str,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> UploadResult:
         destination = self._build_destination(dropbox_root, relative_path)
         file_size = local_path.stat().st_size
         if file_size <= SIMPLE_UPLOAD_LIMIT:
-            return self._simple_upload(local_path, destination)
-        return self._session_upload(local_path, destination)
+            return self._simple_upload(local_path, destination, progress_callback=progress_callback)
+        return self._session_upload(local_path, destination, progress_callback=progress_callback)
 
     def get_current_account(self) -> dict[str, Any]:
         return self._api_request("/2/users/get_current_account", None)
 
-    def _simple_upload(self, local_path: Path, destination: str) -> UploadResult:
+    def _simple_upload(
+        self,
+        local_path: Path,
+        destination: str,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> UploadResult:
+        file_size = local_path.stat().st_size
         with local_path.open("rb") as handle:
             payload = handle.read()
         response = self._content_request(
@@ -168,13 +183,21 @@ class DropboxClient:
                 "strict_conflict": True,
             },
         )
+        if progress_callback is not None:
+            progress_callback(file_size, file_size)
         return UploadResult(
             path_display=str(response["path_display"]),
             path_lower=str(response["path_lower"]),
             dropbox_id=str(response["id"]),
         )
 
-    def _session_upload(self, local_path: Path, destination: str) -> UploadResult:
+    def _session_upload(
+        self,
+        local_path: Path,
+        destination: str,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> UploadResult:
         file_size = local_path.stat().st_size
         with local_path.open("rb") as handle:
             first_chunk = handle.read(CHUNK_SIZE)
@@ -185,6 +208,8 @@ class DropboxClient:
             )
             session_id = str(start_response["session_id"])
             offset = len(first_chunk)
+            if progress_callback is not None:
+                progress_callback(offset, file_size)
 
             while True:
                 chunk = handle.read(CHUNK_SIZE)
@@ -207,6 +232,8 @@ class DropboxClient:
                             },
                         },
                     )
+                    if progress_callback is not None:
+                        progress_callback(file_size, file_size)
                     return UploadResult(
                         path_display=str(finish_response["path_display"]),
                         path_lower=str(finish_response["path_lower"]),
@@ -216,12 +243,22 @@ class DropboxClient:
                     "/2/files/upload_session/append_v2",
                     chunk,
                     {"cursor": cursor, "close": False},
+                    allow_null=True,
                 )
                 offset += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(offset, file_size)
 
         raise DropboxError(f"upload session for {local_path} did not finish")
 
-    def _content_request(self, path: str, body: bytes, api_arg: dict[str, object]) -> dict[str, Any]:
+    def _content_request(
+        self,
+        path: str,
+        body: bytes,
+        api_arg: dict[str, object],
+        *,
+        allow_null: bool = False,
+    ) -> dict[str, Any] | None:
         headers = {
             "Authorization": f"Bearer {self._get_access_token()}",
             "Content-Type": "application/octet-stream",
@@ -233,7 +270,7 @@ class DropboxClient:
             headers=headers,
             method="POST",
         )
-        return self._json_response(req)
+        return self._json_response(req, allow_null=allow_null)
 
     def _api_request(self, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         if payload is None:
@@ -301,9 +338,9 @@ class DropboxClient:
         return cls._json_response(req)
 
     @staticmethod
-    def _json_response(req: request.Request) -> dict[str, Any]:
+    def _json_response(req: request.Request, *, allow_null: bool = False) -> dict[str, Any] | None:
         try:
-            with request.urlopen(req) as response:
+            with request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 payload = response.read().decode("utf-8")
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -315,12 +352,24 @@ class DropboxClient:
             data = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise DropboxError(f"invalid Dropbox JSON response: {payload!r}") from exc
+        if data is None:
+            if allow_null:
+                return None
+            raise DropboxError(f"unexpected Dropbox response: {payload!r}")
         if not isinstance(data, dict):
             raise DropboxError(f"unexpected Dropbox response: {payload!r}")
         return data
 
     @staticmethod
     def _build_destination(dropbox_root: str, relative_path: str) -> str:
-        clean_root = "/" + dropbox_root.strip("/")
-        relative = PurePosixPath(relative_path)
-        return str(PurePosixPath(clean_root) / relative)
+        clean_root_parts = [DropboxClient._sanitize_path_component(part) for part in PurePosixPath(dropbox_root).parts if part not in ("", "/")]
+        relative_parts = [DropboxClient._sanitize_path_component(part) for part in PurePosixPath(relative_path).parts]
+        clean_root = PurePosixPath("/", *clean_root_parts)
+        return str(PurePosixPath(clean_root, *relative_parts))
+
+    @staticmethod
+    def _sanitize_path_component(component: str) -> str:
+        sanitized = component.rstrip(" .")
+        if sanitized:
+            return sanitized
+        return "_"

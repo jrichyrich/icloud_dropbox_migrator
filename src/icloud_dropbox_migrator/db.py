@@ -256,6 +256,32 @@ class StateStore:
                 """
             ).fetchone()
 
+    def active_item(self) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT relative_path, status, updated_at, attempt_count
+                FROM items
+                WHERE item_type = 'file' AND status IN ('hydrating', 'ready_local', 'uploading', 'uploaded')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+    def recent_completed(self, limit: int = 10) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT relative_path, status, uploaded_at, evicted_at
+                FROM items
+                WHERE item_type = 'file' AND status IN ('uploaded', 'evicted')
+                ORDER BY COALESCE(evicted_at, uploaded_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return list(rows)
+
     def update_item_status(
         self,
         item_id: int,

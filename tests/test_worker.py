@@ -106,6 +106,45 @@ class MigrationWorkerTests(unittest.TestCase):
         self.assertEqual(row["status"], "evicted")
         self.assertEqual(row["dropbox_path"], "/Root/nested/example.txt")
 
+    def test_run_resumes_evict_only_for_pending_item_with_uploaded_state(self) -> None:
+        source_root = self.root / "source"
+        source_root.mkdir()
+        sample = source_root / "nested" / "example.txt"
+        sample.parent.mkdir()
+        sample.write_text("hello", encoding="utf-8")
+
+        scan_source_tree(self.store, source_root)
+        with self.store.connection() as conn:
+            conn.execute(
+                """
+                UPDATE items
+                SET status = 'pending',
+                    dropbox_path = '/Root/nested/example.txt',
+                    uploaded_at = '2026-01-01T00:00:00+00:00'
+                WHERE relative_path = 'nested/example.txt'
+                """
+            )
+
+        dropbox_client = mock.Mock()
+        icloud = mock.Mock()
+
+        worker = MigrationWorker(
+            store=self.store,
+            source_root=source_root,
+            dropbox_root="/Root",
+            dropbox_client=dropbox_client,
+            icloud=icloud,
+            retry_limit=1,
+        )
+        summary = worker.run(max_files=1)
+
+        self.assertEqual(summary.processed, 1)
+        self.assertEqual(summary.uploaded, 0)
+        self.assertEqual(summary.evicted, 1)
+        dropbox_client.upload_file.assert_not_called()
+        icloud.ensure_local_file.assert_not_called()
+        icloud.evict_local_copy.assert_called_once_with(sample.resolve())
+
     def test_scan_skips_ds_store(self) -> None:
         source_root = self.root / "source"
         source_root.mkdir()
